@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# nmap scan output — never commit a real target's results
+vlan-scans/
+*.nmap
+*.gnmap
+*.xml
+
+# misc output
+*.log
+*.pcap

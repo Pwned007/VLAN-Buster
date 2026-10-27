@@ -1,0 +1,5 @@
+scapy>=2.5.0
+
+# System dependencies (install via apt):
+#   nmap      — required for the `map` command
+#   snmp      — required for the `snmp` command (apt install snmp)

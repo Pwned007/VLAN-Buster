@@ -1,0 +1,200 @@
+vlanhop.py — Command Reference
+===============================
+
+Basic usage:
+    sudo python3 ~/Desktop/vlanhop.py <command> [flags]
+
+Requires root. Scapy needed for everything; nmap needed only for `map`;
+net-snmp (snmpget/snmpwalk) needed only for `snmp`.
+
+Shared flags (can go before or after the command):
+    -i, --interface          Interface to use (default: default-route iface)
+    --gateway IP             Default gateway (default: auto-detected)
+    --vlans 30 40 50         VLAN IDs (subnet 10.<id>.0.0/24, gw 10.<id>.0.1)
+    --native-vlan N          Port native VLAN (default: CDP recon, else 1)
+    --timeout SEC            Capture window per test (default 8)
+    --octet N                Last octet of spoofed IP 10.<vlan>.0.<octet> (default 240)
+    --fast                   ~2x shorter listen windows
+
+
+===== DETECTION =====
+
+
+1) assess — full detection battery (default)
+--------------------------------------------
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 assess
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 assess --fast
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 assess --gateway 10.10.0.1
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 assess --vlans 30 40 50 60 --native-vlan 1
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 assess --passive 20 --timeout 12 --flood 8000 --dhcp 100
+
+    Extra flags: --passive (recon seconds, default 12), --flood (MAC flood frames, 5000),
+                 --dhcp (DISCOVER count, 60).
+
+    Runs: recon -> DTP -> GVRP -> VTP -> STP -> double-tag (per VLAN)
+          -> spoof-reach (per VLAN) -> MAC flood -> DHCP
+          -> passive HSRP/VRRP + IPv6-RA surface detection, then prints the verdict table.
+
+
+2) recon — passive discovery
+----------------------------
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 recon
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 recon --seconds 45
+
+    Learns native VLAN, VLAN IDs, switch platform (CDP/LLDP/STP/PVST+/VTP), counts
+    tagged vs untagged frames, and flags HSRP/VRRP/IPv6-RA presence.
+
+
+3) reach — attribute specific targets (L2 hop vs L3 routing)
+------------------------------------------------------------
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 reach --targets 10.30.0.1 10.40.0.1 10.50.0.1 10.60.0.1
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 reach --targets 10.30.0.26 --gateway 10.10.0.1
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 reach --targets 10.30.0.1 --timeout 12
+
+    Pings each target and records the reply's source MAC:
+      ROUTED    = gateway MAC (normal routing, not a hop)
+      L2 REACH  = non-gateway MAC (real L2 adjacency)
+      no reply  = falls back to spoof test -> L3-SEG / etc.
+
+
+4) map — nmap a reachable VLAN (spoofed source)
+-----------------------------------------------
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 map --vlan 30
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 map --vlan 40 --ports 22,80,443,445
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 map --vlan 30 --connect --no-os
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 map --vlan 30 --host-timeout 60
+
+    Checks spoof/direct reach first, then runs nmap (-sS -sV -O) with the spoofed source.
+    Saves to ~/Desktop/vlan-scans/vlan<id>_<timestamp>.nmap/.gnmap
+
+    Flags: --vlan (required), --ports (nmap -p), --no-os, --connect (-sT),
+           --host-timeout (default 90).
+
+
+5) hosts — find real hosts behind a proxy-ARP gateway
+-----------------------------------------------------
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 hosts
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 hosts --subnets 10.30.0.0/24 10.40.0.0/24
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 hosts --subnets 10.50.0.0/24 --ports 22 80 443 445 3389 8080
+
+    SYN-sweeps each subnet, groups replies by TTL, and flags hosts whose TTL is lower than
+    the gateway's own (one hop behind the router). Prints a TTL histogram per subnet.
+
+
+===== ACTIVE / RED-TEAM =====
+
+
+6) mitm — ARP spoof MITM (the classic spoofing attack)
+------------------------------------------------------
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 mitm --targets 10.10.0.5
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 mitm --targets 10.10.0.5 10.10.0.6 --duration 120
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 mitm --targets 10.10.0.5 --no-forward   # drop = DoS
+
+    Poisons each victim's view of the gateway (and the gateway's view of each victim) so
+    their traffic flows through us. Enables IP forwarding unless --no-forward. Restores
+    ARP caches and forwarding on exit/Ctrl+C.
+
+    Flags: --targets (required), --duration (default 60), --no-forward.
+
+
+7) rogue-dhcp — rogue DHCP server (redirect gateway/DNS to us)
+--------------------------------------------------------------
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 rogue-dhcp
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 rogue-dhcp --starvation 500
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 rogue-dhcp --router 10.10.0.99 --dns 10.10.0.99
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 rogue-dhcp --pool-start 10.10.0.150 --duration 120
+
+    Answers DHCP DISCOVERs with OFFERs handing out OUR IP as default gateway + DNS,
+    turning us into the MITM for everyone who leases from us. --starvation exhausts the
+    real pool first so our OFFER is the only one accepted.
+
+    Flags: --pool-start, --router (default our IP), --dns (default our IP),
+           --starvation (DISCOVER count), --duration (default 60).
+
+
+8) ipv6 — rogue IPv6 router advertisement (SLAAC takeover)
+----------------------------------------------------------
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 ipv6
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 ipv6 --prefix fd00:: --lifetime 1800
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 ipv6 --duration 300
+
+    Advertises our MAC as an on-link IPv6 default router (and answers Router
+    Solicitations), so IPv6-enabled hosts adopt us as their gateway. IPv6 is often
+    unmonitored/unsegmented even when IPv4 is locked down.
+
+    Flags: --prefix (default fd00::), --lifetime (default 1800s), --duration (default 60).
+
+
+9) hsrp — HSRP/VRRP first-hop spoof (become the default gateway)
+---------------------------------------------------------------
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 hsrp --vip 10.10.0.1 --group 1
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 hsrp --vip 10.10.0.1 --group 1 --version 2 --priority 255
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 hsrp --vip 10.10.0.1 --duration 120
+
+    Injects HSRP active-role hellos (priority 255) plus gratuitous ARP for the VIP, so
+    hosts point their default-gateway traffic at us. Only works when HSRP/VRRP is in use
+    (see recon/assess to confirm) and the segment allows it.
+
+    Flags: --vip (required), --group (default 1), --priority (default 255),
+           --version {1,2} (default 1), --duration (default 60).
+
+
+10) snmp — SNMP community brute + VLAN DB enumeration
+-----------------------------------------------------
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 snmp --target 10.10.0.1
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 snmp --target 10.10.0.1 --communities public private cisco secret
+
+    Brutes default SNMP v1/v2c communities, then enumerates the VLAN table
+    (dot1qVlanStaticName). If a read-write community (private/write/admin) is found it
+    flags that SNMP SET can reassign a port's VLAN = full VLAN bypass (reports the exact
+    snmpset command; does NOT execute writes).
+
+    Requires: apt install snmp.  Flags: --target (required), --communities.
+
+
+11) neighbor-spoof — forge CDP/LLDP (switch/trunk impersonation)
+---------------------------------------------------------------
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 neighbor-spoof --mode both
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 neighbor-spoof --mode cdp --device-id CORE-SW --vlan 1
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 neighbor-spoof --mode lldp --duration 60
+
+    Injects forged CDP and/or LLDP frames advertising us as a switch with a trunk/native
+    VLAN, to trick dynamic trunking/auto-config or leak a false topology.
+
+    Flags: --mode {cdp,lldp,both}, --device-id, --platform, --vlan,
+           --mgmt-ip, --duration (default 30).
+
+
+Typical workflow
+----------------
+    # 1. learn the lay of the land
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 recon --seconds 30
+
+    # 2. full assessment (fast first, then full for accuracy)
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 assess --fast
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 assess
+
+    # 3. prove reach to specific hosts
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 reach --targets 10.30.0.1 10.40.0.1 10.50.0.1 10.60.0.1
+
+    # 4. map whatever is reachable
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 map --vlan 30
+
+    # 5. find the real hosts (not the gateway answering for everything)
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 hosts
+
+    # 6. go on the offensive (only against authorized targets)
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 mitm --targets 10.10.0.5
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 rogue-dhcp --starvation 500
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 ipv6
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 hsrp --vip 10.10.0.1
+    sudo python3 ~/Desktop/vlanhop.py -i eth0 snmp --target 10.10.0.1
+
+
+Conventions
+-----------
+The tool assumes VLAN <id> maps to subnet 10.<id>.0.0/24 with gateway 10.<id>.0.1 and
+spoof IP 10.<id>.0.<octet>. If a VLAN uses a different scheme, pass --gateway/--octet
+and use reach/map with explicit targets.
+
+Authorized use only. Run only on networks you own or have written permission to test.
